@@ -371,7 +371,7 @@ if flagging is not None:
 else:
     data, I_fitter = load_result
 
-print(f"Power-law fit: I₀ = {I_fitter.fit_params[0]:.4f}, α = {I_fitter.fit_params[1]:.4f}")
+print(f"Power-law fit: I₀ = {I_fitter.fit_params[0]:.4f}, α_ν = {-2 * I_fitter.fit_params[1]:.4f}")
 
 plot_data_diagnostic(data, I_fitter=I_fitter, title=None,
                     filename=f"{data_id}_data.png", output_dir=PLOTS_DIR,)

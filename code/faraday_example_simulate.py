@@ -54,10 +54,28 @@ print(f"Output directory: {output_dir.absolute()}")
 # Components are automatically labeled S1, S2, ... (thin screens),
 # P1, P2, ... (powerlaw), T1, T2, ... (thick screens)
 
+# PER-COMPONENT STOKES I SPECTRA (optional, any component type)
+# Give a component its own emitting region with
+#   'spectral_index': alpha_k   Stokes I index of that region, I_k ∝ ν^alpha_k
+#   'I_frac': f_k               fraction of the total I at NU_REF_GHZ from that region
+# The total Stokes I is then the sum of the regions plus a remainder
+#   I(ν) = I_ref [ Σ_k f_k (ν/ν_ref)^alpha_k + (1 - Σ_k f_k) (ν/ν_ref)^SPECTRAL_INDEX ]
+# (the remainder is unpolarized emission plus any components without their own
+# spectral_index; SPECTRAL_INDEX is set in run_test_scenario). If Σ f_k = 1 the
+# remainder vanishes and SPECTRAL_INDEX has no effect.
+# The polarized flux of component k scales with its own region:
+#   P_k(ν) = p_k(λ²) · I_ref · (ν/ν_ref)^alpha_k
+# so p0 is that component's polarized flux as a fraction of the TOTAL I at
+# NU_REF_GHZ (the region's own polarization fraction is p0 / f_k).
+# Omitted / None → the component follows the remainder spectrum.
+# Locally, component k looks like a ThinPowerLawComponent with
+# beta = alpha_k - alpha_I(ν), where alpha_I(ν) is the local index of the total
+# I, so fitting 'S' vs 'P' tests the systematic.
+
 # THIN SCREEN COMPONENTS (S1, S2, ...)
 THIN_COMPONENTS = [
-    {'p0': 0.034, 'psi_0_deg': -17, 'phi_rm': -4.5},  # S1 (e.g., ISM)
-    #{'p0': 0.01, 'psi_0_deg': 37, 'phi_rm': 0.0},     # S2 (e.g., Jet)
+    {'p0': 0.03, 'psi_0_deg': -17, 'phi_rm': -4.5, 'spectral_index': -0.6, 'I_frac': 0.5},  # S1 (e.g., ISM)
+#     {'p0': 0.02, 'psi_0_deg': 37, 'phi_rm': 30.0, 'spectral_index': -0.4, 'I_frac': 0.5},    # S2 (e.g., Jet)
 ]
 
 # POWERLAW COMPONENTS (P1, P2, ...)
@@ -68,8 +86,8 @@ POWERLAW_COMPONENTS = [
 
 # THICK SCREEN COMPONENTS (T1, T2, ...)
 THICK_COMPONENTS = [
-#   {'p0': 0.006, 'psi_0_deg': 62.4, 'phi_peak': -88.0, 'sigma_phi': 20.8, 'N': 15.6},  # T1 (e.g., Source)
-    {'p0': 0.056, 'psi_0_deg': -90.0, 'phi_peak': -4.06, 'sigma_phi':13, 'N': 30},  # T2 (e.g., Jet)
+#    {'p0': 0.006, 'psi_0_deg': 62.4, 'phi_peak': -88.0, 'sigma_phi': 20.8, 'N': 15.6},  # T1 (e.g., Source)
+    {'p0': 0.03, 'psi_0_deg': -90.0, 'phi_peak': 40.0, 'sigma_phi':23, 'N': 30, 'spectral_index': -0.3, 'I_frac': 0.5},  # T2 (e.g., Jet)
 ]
 
 # MODEL TO FIT
@@ -84,6 +102,9 @@ QUICK_MODE = False
 
 # Uncomment for reproducible results
 # np.random.seed(42)
+
+# Reference frequency (GHz) for the Stokes I power laws and per-component p0
+NU_REF_GHZ = 1.3
 
 
 # =============================================================================
@@ -188,15 +209,172 @@ def parse_model_spec(model_spec, thin_comps, powerlaw_comps, thick_comps):
     n_powerlaw = model_spec.count('P')
     n_thick = model_spec.count('T')
 
-    # Check we have enough components defined
-    if n_thin > len(thin_comps):
-        raise ValueError(f"Model spec requests {n_thin} thin components but only {len(thin_comps)} defined")
-    if n_powerlaw > len(powerlaw_comps):
-        raise ValueError(f"Model spec requests {n_powerlaw} powerlaw components but only {len(powerlaw_comps)} defined")
-    if n_thick > len(thick_comps):
-        raise ValueError(f"Model spec requests {n_thick} thick components but only {len(thick_comps)} defined")
+    # Pad with default templates when the spec requests more components than the
+    # truth defines (e.g. fitting 'SP' to an 'SS' truth with per-component spectral
+    # indices). Fitted parameters are zeroed anyway; lambda_sq_0=None lets FitSetup
+    # set the power-law reference to lambda_sq_ref.
+    defaults = {
+        'S': {'p0': 0.0, 'psi_0_deg': 0.0, 'phi_rm': 0.0},
+        'P': {'p0': 0.0, 'psi_0_deg': 0.0, 'phi_rm': 0.0, 'beta': 0.0, 'lambda_sq_0': None},
+        'T': {'p0': 0.0, 'psi_0_deg': 0.0, 'phi_peak': 0.0, 'sigma_phi': 10.0, 'N': 2.0},
+    }
 
-    return thin_comps[:n_thin], powerlaw_comps[:n_powerlaw], thick_comps[:n_thick]
+    def take(comps, n, kind):
+        if n > len(comps):
+            print(f"  Model spec requests {n} '{kind}' components but only {len(comps)} defined "
+                  f"— padding with default templates")
+        return list(comps[:n]) + [dict(defaults[kind]) for _ in range(n - len(comps))]
+
+    return (take(thin_comps, n_thin, 'S'), take(powerlaw_comps, n_powerlaw, 'P'),
+            take(thick_comps, n_thick, 'T'))
+
+
+def get_component_stokes_i(thin_comps, powerlaw_comps, thick_comps, background_index):
+    """
+    Per-component Stokes I spectra, in the same order as the components of the
+    model from build_model_from_config (thin, power-law, thick).
+
+    Components without a 'spectral_index' (or with None) follow the remainder
+    spectrum (background_index) and contribute no Stokes I of their own.
+
+    Returns:
+        dict with 'alphas' (alpha_k per component), 'I_fracs' (f_k per
+        component, fraction of total I at NU_REF_GHZ) and 'background_index'
+    """
+    alphas, I_fracs = [], []
+    for c in (*thin_comps, *powerlaw_comps, *thick_comps):
+        if c.get('spectral_index') is None:
+            alphas.append(background_index)
+            I_fracs.append(0.0)
+        else:
+            if c.get('I_frac') is None:
+                raise ValueError(f"Component {c} has a 'spectral_index' but no 'I_frac' "
+                                 "(fraction of the total Stokes I at NU_REF_GHZ)")
+            alphas.append(c['spectral_index'])
+            I_fracs.append(c['I_frac'])
+    if sum(I_fracs) > 1.0 + 1e-9 or min(I_fracs, default=0.0) < 0.0:
+        raise ValueError(f"I_frac values must be >= 0 and sum to <= 1, got {I_fracs}")
+    return {'alphas': alphas, 'I_fracs': I_fracs, 'background_index': background_index}
+
+
+def stokes_i_spectrum(freq_ghz, stokes_i):
+    """
+    Total Stokes I normalised to 1 at NU_REF_GHZ:
+
+        i(ν) = Σ_k f_k (ν/ν_ref)^alpha_k + (1 - Σ_k f_k) (ν/ν_ref)^alpha_bg
+
+    Returns:
+        (i_tot, i_rest, i_components): total, remainder, and per-component arrays
+    """
+    x = np.asarray(freq_ghz) / NU_REF_GHZ
+    i_components = [f * x**a for a, f in zip(stokes_i['alphas'], stokes_i['I_fracs'])]
+    i_rest = (1.0 - sum(stokes_i['I_fracs'])) * x**stokes_i['background_index']
+    return i_rest + sum(i_components), i_rest, i_components
+
+
+def stokes_i_local_index(freq_ghz, stokes_i):
+    """Local spectral index d ln I / d ln ν of the total Stokes I."""
+    x = np.asarray(freq_ghz) / NU_REF_GHZ
+    alphas = [*stokes_i['alphas'], stokes_i['background_index']]
+    fracs = [*stokes_i['I_fracs'], 1.0 - sum(stokes_i['I_fracs'])]
+    terms = [f * x**a for a, f in zip(alphas, fracs)]
+    return sum(a * t for a, t in zip(alphas, terms)) / sum(terms)
+
+
+def compute_spectral_polarization(model, lambda_sq, freq_ghz, stokes_i=None):
+    """
+    Fractional polarization P/I_total including per-component Stokes I spectra:
+
+        P(λ²) = Σ_k P_k(λ²) · (ν/ν_ref)^alpha_k / i(ν)
+
+    with i(ν) from stokes_i_spectrum. Reduces to model.compute_polarization
+    when every component follows the remainder spectrum (or stokes_i is None).
+    """
+    if stokes_i is None:
+        return model.compute_polarization(lambda_sq)
+    if len(stokes_i['alphas']) != len(model.components):
+        raise ValueError(f"Got {len(stokes_i['alphas'])} spectral indices for "
+                         f"{len(model.components)} components")
+    i_tot, _, _ = stokes_i_spectrum(freq_ghz, stokes_i)
+    x = freq_ghz / NU_REF_GHZ
+    P = np.zeros(len(lambda_sq), dtype=complex)
+    for comp, alpha_k in zip(model.components, stokes_i['alphas']):
+        P += comp.compute_polarization(lambda_sq) * x**alpha_k
+    return P / i_tot
+
+
+def build_effective_truth(true_component_info, fit_component_info, stokes_i,
+                          fit_lambda_sq_0=None):
+    """
+    Re-express the true components in the component types of the fit model, so
+    the corner plots can show the truth the fit should recover.
+
+    Component k contributes P_k(λ²) · w_k(ν) to P/I with
+    w_k = (ν/ν_ref)^alpha_k / i(ν). Expanding about ν₀ (= c/λ₀, the fitted
+    power-law reference) gives a ThinPowerLawComponent with
+        beta = beta_true + alpha_k - alpha_I(ν₀),   (a, b) → (a, b) · w_k(ν₀)
+    where alpha_I(ν₀) is the local index of the total I (stokes_i_local_index);
+    a true power-law component is also rescaled from its own λ²₀ by
+    (λ²₀/λ²₀ₜ)^(-β/2). This is exact if the total I is a single power law, and
+    first order otherwise (the total I is then curved).
+    Thin/power-law truths placed in an 'S' slot keep their (a, b, φ), i.e. the
+    value at NU_REF_GHZ; thick truths are only mapped to 'T' slots, as is.
+
+    Thin/power-law truths go to the fit's 'P' slots in order of decreasing
+    |effective beta|, the rest to 'S' slots.
+
+    Args:
+        true_component_info: From build_model_from_config, in model order
+        fit_component_info: From build_model_from_config for the fit model
+        stokes_i: From get_component_stokes_i for the true components
+        fit_lambda_sq_0: λ²₀ of the fitted power-law components (needed if
+            the fit has any 'P' slots)
+
+    Returns:
+        List of component info dicts (same format as true_component_info, one
+        per true component, typed to match the fit), or None if the true
+        components cannot be placed into the fit's slots.
+    """
+    fit_types = [f['type'] for f in fit_component_info]
+    n_P = fit_types.count('ThinPowerLawComponent')
+    n_T = fit_types.count('ThickComponent')
+
+    alpha_of = {info['label']: a for info, a in zip(true_component_info, stokes_i['alphas'])}
+    thick = [t for t in true_component_info if t['type'] == 'ThickComponent']
+    screens = [t for t in true_component_info if t['type'] != 'ThickComponent']
+    if len(thick) != n_T or len(screens) != len(fit_types) - n_T:
+        return None
+    if n_P > 0 and fit_lambda_sq_0 is None:
+        raise ValueError("fit_lambda_sq_0 is required when the fit has power-law components")
+
+    # Expansion point: the fitted power-law reference (NU_REF_GHZ if no 'P' slots)
+    nu_0_ghz = C_LIGHT / np.sqrt(fit_lambda_sq_0) / 1e9 if n_P > 0 else NU_REF_GHZ
+    i_tot_0, _, _ = stokes_i_spectrum(nu_0_ghz, stokes_i)
+    alpha_I_0 = stokes_i_local_index(nu_0_ghz, stokes_i)
+
+    def beta_eff(info):
+        return info['params'].get('beta', 0.0) + alpha_of[info['label']] - alpha_I_0
+
+    screens = sorted(screens, key=lambda t: -abs(beta_eff(t)))
+
+    effective = []
+    for rank, info in enumerate(screens):
+        params = info['params']
+        if rank < n_P:
+            scale = (nu_0_ghz / NU_REF_GHZ)**alpha_of[info['label']] / i_tot_0
+            if info['type'] == 'ThinPowerLawComponent':
+                scale *= (fit_lambda_sq_0 / params['lambda_sq_0'])**(-params['beta'] / 2)
+            new_params = dict(params, a=params['a'] * scale, b=params['b'] * scale,
+                              p0=params['p0'] * scale, beta=beta_eff(info),
+                              lambda_sq_0=fit_lambda_sq_0)
+            effective.append({'label': info['label'], 'type': 'ThinPowerLawComponent',
+                              'params': new_params})
+        else:
+            new_params = {k: v for k, v in params.items() if k not in ('beta', 'lambda_sq_0')}
+            effective.append({'label': info['label'], 'type': 'ThinComponent',
+                              'params': new_params})
+
+    return effective + thick
 
 
 def match_components(fit_component_info, true_component_info, param_summary):
@@ -317,7 +495,8 @@ def match_components(fit_component_info, true_component_info, param_summary):
 
 def generate_synthetic_data(model, output_file, freq_ghz_range=(0.9, 1.7), n_channels=128,
                            spectral_index=-0.35, I_ref=1.0, snr=25,
-                           oscillation=False, only_I=True):
+                           oscillation=False, only_I=True,
+                           stokes_i=None):
     """
     Generate synthetic polarized data and save directly to file.
 
@@ -326,11 +505,16 @@ def generate_synthetic_data(model, output_file, freq_ghz_range=(0.9, 1.7), n_cha
         output_file: Path to save the data file
         freq_ghz_range: Frequency range in GHz (min, max)
         n_channels: Number of frequency channels
-        spectral_index: Spectral index alpha (I ∝ ν^alpha)
-        I_ref: Reference total intensity at 1.4 GHz
+        spectral_index: Spectral index alpha (I ∝ ν^alpha); with stokes_i,
+            only that of the remainder emission (stokes_i['background_index'])
+        I_ref: Total intensity at NU_REF_GHZ
         snr: Signal-to-noise ratio for noise calculation
         oscillation: If True, add sinusoidal oscillation (3 periods over λ band)
         only_I: If True, fractional pol constant; if False, absolute pol constant
+        stokes_i: Optional per-component Stokes I spectra from
+            get_component_stokes_i. The total I becomes the sum of the
+            component regions plus the remainder (stokes_i_spectrum). None →
+            single power law, all components follow it.
     """
     # Generate frequency grid
     freq_ghz = np.linspace(freq_ghz_range[0], freq_ghz_range[1], n_channels)
@@ -338,12 +522,15 @@ def generate_synthetic_data(model, output_file, freq_ghz_range=(0.9, 1.7), n_cha
     lambda_sq = lambda_m**2  # Wavelength squared in m^2
     freq_hz = freq_ghz * 1e9  # Frequency in Hz
 
-    # Generate power-law total intensity spectrum: I(ν) = I_ref * (ν / ν_ref)^alpha
-    nu_ref = 1.3  # Reference frequency in GHz
-    I = I_ref * (freq_ghz / nu_ref)**spectral_index
+    # Total intensity: single power law I_ref * (ν / ν_ref)^alpha, or the sum of
+    # the per-component regions plus the remainder
+    if stokes_i is None:
+        I = I_ref * (freq_ghz / NU_REF_GHZ)**spectral_index
+    else:
+        I = I_ref * stokes_i_spectrum(freq_ghz, stokes_i)[0]
 
-    # Compute complex polarization P = Q + iU from model (fractional)
-    P = model.compute_polarization(lambda_sq)
+    # Compute complex polarization P = Q + iU from model (fractional w.r.t. total I)
+    P = compute_spectral_polarization(model, lambda_sq, freq_ghz, stokes_i)
     Q_frac = P.real
     U_frac = P.imag
 
@@ -391,6 +578,257 @@ def generate_synthetic_data(model, output_file, freq_ghz_range=(0.9, 1.7), n_cha
             f.write(f"{I_err[i]:.6e}  {Q_err[i]:.6e}  {U_err[i]:.6e}\n")
 
     print(f"Saved synthetic data to: {output_file}")
+
+
+# =============================================================================
+# PER-COMPONENT SPECTRAL INDEX DIAGNOSTIC PLOT
+# =============================================================================
+
+def plot_spectral_index_diagnostic(data: PolarizationData,
+                                   true_model: 'CompositeModel',
+                                   stokes_i: dict,
+                                   component_labels: Optional[list] = None,
+                                   I_ref: float = 1.0,
+                                   results: Optional['FitResults'] = None,
+                                   n_posterior_samples: int = 100,
+                                   title: Optional[str] = None,
+                                   filename: Optional[str] = None,
+                                   output_dir: Optional[Path] = None,
+                                   show: bool = False) -> plt.Figure:
+    """
+    Six-panel diagnostic of the systematic introduced when components do not
+    share the total Stokes I spectrum.
+
+    Two truths are compared throughout:
+    - "true": the polarization actually simulated, with each component's
+      polarized flux following its own region, alpha_k, and the total I the sum
+      of all regions (compute_spectral_polarization)
+    - "common α": the same components all following the total I spectrum
+      (constant fractional polarization), i.e. what a Q/I, U/I fit with
+      standard components implicitly assumes
+
+    Panels:
+    - (a) Flux density vs ν (log-log): data and total I, each region's I_k
+      and the remainder (dotted), and per-component polarized flux |P_k|,
+      true (solid) and common-α (dashed)
+    - (b) Per-component weighting w_k = (ν/ν_ref)^alpha_k / i(ν) vs λ²,
+      annotated with the local equivalent power-law beta at NU_REF_GHZ
+    - (c) |P_true - P_common| per channel in units of σ, with the total Δχ²
+    - (d) p(λ²): data, true, common-α, and posterior band if results given
+    - (e) ψ(λ²): as (d)
+    - (f) Normalised q, u residuals: data - fit median if results given,
+      otherwise data - common-α truth
+
+    Args:
+        data: PolarizationData (fractional q, u) used for the fit
+        true_model: Ground-truth CompositeModel (p0 at NU_REF_GHZ)
+        stokes_i: Per-component Stokes I spectra (get_component_stokes_i)
+        component_labels: Labels per component (defaults to comp.name)
+        I_ref: Total intensity at NU_REF_GHZ (as in generate_synthetic_data)
+        results: Optional FitResults to overlay the fitted model
+        n_posterior_samples: Number of posterior draws for bands
+        title: Optional figure title
+        filename: If provided, save figure to disk
+        output_dir: Directory for saving
+        show: If True, display plot interactively
+
+    Returns:
+        Figure object
+    """
+    setup_publication_quality()
+
+    if component_labels is None:
+        component_labels = [comp.name for comp in true_model.components]
+
+    lambda_sq = data.lambda_sq
+    freq_ghz = C_LIGHT / np.sqrt(lambda_sq) / 1e9
+    lambda_sq_fine = np.linspace(lambda_sq.min(), lambda_sq.max(), 2000)
+    freq_fine = C_LIGHT / np.sqrt(lambda_sq_fine) / 1e9
+
+    P_true_fine = compute_spectral_polarization(true_model, lambda_sq_fine, freq_fine, stokes_i)
+    P_common_fine = true_model.compute_polarization(lambda_sq_fine)
+    P_true = compute_spectral_polarization(true_model, lambda_sq, freq_ghz, stokes_i)
+    P_common = true_model.compute_polarization(lambda_sq)
+
+    # --- Posterior bands ---
+    posterior = []
+    if results is not None and n_posterior_samples > 0:
+        n_total = len(results.samples)
+        weights_norm = results.weights / np.sum(results.weights)
+        indices = np.random.choice(n_total, size=min(n_posterior_samples, n_total),
+                                   replace=False, p=weights_norm)
+        for idx in indices:
+            model_sample = copy.deepcopy(results.setup.model)
+            update_model_from_params(model_sample, results.samples[idx],
+                                     results.setup.param_names,
+                                     lambda_sq_ref=getattr(results.setup, "lambda_sq_ref", None))
+            posterior.append(np.concatenate([model_sample.compute_polarization(lambda_sq_fine),
+                                             model_sample.compute_polarization(lambda_sq)]))
+    if posterior:
+        posterior = np.array(posterior)
+        post_fine, post_chan = posterior[:, :len(lambda_sq_fine)], posterior[:, len(lambda_sq_fine):]
+        p_pct = np.percentile(np.abs(post_fine), [16, 50, 84], axis=0)
+        psi_pct = np.percentile(np.degrees(np.angle(post_fine) / 2), [16, 50, 84], axis=0)
+        P_resid_model = np.median(post_chan.real, axis=0) + 1j * np.median(post_chan.imag, axis=0)
+        resid_label = 'data − fit median'
+    else:
+        p_pct = psi_pct = None
+        P_resid_model = P_common
+        resid_label = 'data − common-α truth'
+
+    fig, axes = plt.subplots(2, 3, figsize=(15, 8.5))
+    ax_flux, ax_weight, ax_sys = axes[0]
+    ax_p, ax_psi, ax_res = axes[1]
+    colors = [f'C{i}' for i in range(len(true_model.components))]
+
+    # ------------------------------------------------------------------------
+    # (a) Flux density spectra
+    # ------------------------------------------------------------------------
+    i_tot_fine, i_rest_fine, i_comp_fine = stokes_i_spectrum(freq_fine, stokes_i)
+    alpha_I_ref = stokes_i_local_index(NU_REF_GHZ, stokes_i)
+    if data.I is not None:
+        ax_flux.plot(freq_ghz, data.I, '.', color='lightgrey', markersize=3, zorder=1)
+    ax_flux.plot(freq_fine, I_ref * i_tot_fine, '-', color='black', linewidth=2.0,
+                 label=rf'Total $I$ ($\alpha_I(\nu_{{\rm ref}})$={alpha_I_ref:+.2f})')
+    if np.any(i_rest_fine > 0):
+        ax_flux.plot(freq_fine, I_ref * i_rest_fine, ':', color='gray', linewidth=1.5,
+                     label=rf'Remainder $I$ ($\alpha$={stokes_i["background_index"]:+.2f})')
+    for comp, alpha_k, i_k, label, color in zip(true_model.components, stokes_i['alphas'],
+                                                i_comp_fine, component_labels, colors):
+        if np.any(i_k > 0):
+            ax_flux.plot(freq_fine, I_ref * i_k, ':', color=color, linewidth=1.5)
+        P_k_fine = np.abs(comp.compute_polarization(lambda_sq_fine)) * I_ref
+        ax_flux.plot(freq_fine, P_k_fine * (freq_fine / NU_REF_GHZ)**alpha_k, '-',
+                     color=color, linewidth=2.0,
+                     label=rf'$|P_{{\rm {label}}}|$ ($\alpha$={alpha_k:+.2f})')
+        ax_flux.plot(freq_fine, P_k_fine * i_tot_fine, '--',
+                     color=color, linewidth=1.0, alpha=0.7)
+    ax_flux.axvline(NU_REF_GHZ, color='gray', linestyle=':', linewidth=0.8)
+    ax_flux.set_xscale('log')
+    ax_flux.set_yscale('log')
+    ax_flux.set_xlabel(r'$\nu$ (GHz)')
+    ax_flux.set_ylabel(r'Flux density (units of $I_{\rm ref}$)')
+    ax_flux.legend(fontsize=9, loc='best')
+    ax_flux.text(0.03, 0.03, 'solid: true |P|   dashed: common α   dotted: region I',
+                 transform=ax_flux.transAxes,
+                 fontsize=9, color='gray')
+    ax_flux.grid(True, alpha=0.3, which='both')
+    add_ticks_all_sides(ax_flux)
+
+    # ------------------------------------------------------------------------
+    # (b) Spectral weighting relative to total I
+    # ------------------------------------------------------------------------
+    for alpha_k, label, color in zip(stokes_i['alphas'], component_labels, colors):
+        d_alpha = alpha_k - alpha_I_ref
+        ax_weight.plot(lambda_sq_fine, (freq_fine / NU_REF_GHZ)**alpha_k / i_tot_fine, '-',
+                       color=color, linewidth=2.0,
+                       label=rf'{label}: $\beta_{{\rm eq}}$ = {d_alpha:+.2f}')
+    ax_weight.axhline(1.0, color='gray', linestyle=':', linewidth=0.8)
+    ax_weight.set_xlabel(r'$\lambda^2$ (m$^2$)')
+    ax_weight.set_ylabel(r'$w_k = (\nu/\nu_{\rm ref})^{\alpha_k}\,/\,i(\nu)$')
+    ax_weight.legend(fontsize=9, loc='best')
+    ax_weight.grid(True, alpha=0.3)
+    add_ticks_all_sides(ax_weight)
+
+    # ------------------------------------------------------------------------
+    # (c) Systematic per channel in units of the noise
+    # ------------------------------------------------------------------------
+    dP = P_true - P_common
+    sigma = np.sqrt(0.5 * (data.Q_err**2 + data.U_err**2))
+    delta_chi2 = np.sum((dP.real / data.Q_err)**2 + (dP.imag / data.U_err)**2)
+    ax_sys.plot(lambda_sq, np.abs(dP) / sigma, 'o-', color='black', markersize=3, linewidth=1.0)
+    ax_sys.axhline(1.0, color='C3', linestyle='--', linewidth=1.0, label=r'$1\sigma$')
+    ax_sys.set_xlabel(r'$\lambda^2$ (m$^2$)')
+    ax_sys.set_ylabel(r'$|P_{\rm true} - P_{\rm common}|\,/\,\sigma$')
+    ax_sys.text(0.03, 0.95, rf'$\Delta\chi^2$ = {delta_chi2:.1f} ($N_{{\rm chan}}$ = {len(lambda_sq)})',
+                transform=ax_sys.transAxes, ha='left', va='top', fontsize=11)
+    ax_sys.set_ylim(bottom=0.0)
+    ax_sys.legend(fontsize=9, loc='upper right')
+    ax_sys.grid(True, alpha=0.3)
+    add_ticks_all_sides(ax_sys)
+
+    # ------------------------------------------------------------------------
+    # (d) p(λ²) and (e) ψ(λ²)
+    # ------------------------------------------------------------------------
+    p_data, p_err, chi_data, chi_err = compute_polarization_quantities(
+        data.Q, data.U, data.Q_err, data.U_err,
+        method='mc', n_samples=1000, debias=True
+    )
+    ax_p.errorbar(lambda_sq, p_data, yerr=list(p_err),
+                  fmt='o', markerfacecolor='lightgrey', markeredgecolor='black',
+                  ecolor='black', markersize=3, markeredgewidth=0.5, zorder=1)
+    ax_psi.errorbar(lambda_sq, np.degrees(chi_data),
+                    yerr=[np.degrees(chi_err[0]), np.degrees(chi_err[1])],
+                    fmt='o', markerfacecolor='lightgrey', markeredgecolor='black',
+                    ecolor='black', markersize=3, markeredgewidth=0.5, zorder=1)
+    if p_pct is not None:
+        ax_p.fill_between(lambda_sq_fine, p_pct[0], p_pct[2], color='C0', alpha=0.3, zorder=4)
+        ax_p.plot(lambda_sq_fine, p_pct[1], '-', color='C0', linewidth=1.5, zorder=5, label='Fit')
+        ax_psi.fill_between(lambda_sq_fine, psi_pct[0], psi_pct[2], color='C0', alpha=0.3, zorder=4)
+        ax_psi.plot(lambda_sq_fine, psi_pct[1], '-', color='C0', linewidth=1.5, zorder=5)
+    ax_p.plot(lambda_sq_fine, np.abs(P_true_fine), '-', color='black', linewidth=2.0,
+              zorder=6, label='True')
+    ax_p.plot(lambda_sq_fine, np.abs(P_common_fine), '--', color='C3', linewidth=1.5,
+              zorder=7, label='Common α')
+    ax_psi.plot(lambda_sq_fine, np.degrees(np.angle(P_true_fine) / 2), '-', color='black',
+                linewidth=2.0, zorder=6)
+    ax_psi.plot(lambda_sq_fine, np.degrees(np.angle(P_common_fine) / 2), '--', color='C3',
+                linewidth=1.5, zorder=7)
+    ax_p.set_xlabel(r'$\lambda^2$ (m$^2$)')
+    ax_p.set_ylabel(r'$p(\lambda^2)$')
+    ax_p.set_ylim(bottom=0.0)
+    ax_p.legend(fontsize=9, loc='best')
+    ax_p.grid(True, alpha=0.3)
+    add_ticks_all_sides(ax_p)
+    ax_psi.set_xlabel(r'$\lambda^2$ (m$^2$)')
+    ax_psi.set_ylabel(r'$\psi(\lambda^2)$ (deg)')
+    ax_psi.set_ylim(-90, 90)
+    ax_psi.grid(True, alpha=0.3)
+    add_ticks_all_sides(ax_psi)
+
+    # ------------------------------------------------------------------------
+    # (f) Normalised residuals
+    # ------------------------------------------------------------------------
+    res_q = (data.Q - P_resid_model.real) / data.Q_err
+    res_u = (data.U - P_resid_model.imag) / data.U_err
+    chi2_red = (np.sum(res_q**2) + np.sum(res_u**2)) / (2 * len(lambda_sq))
+    ax_res.plot(lambda_sq, res_q, 'o', color='C0', markersize=3, label='q')
+    ax_res.plot(lambda_sq, res_u, 's', color='C1', markersize=3, label='u')
+    # Expected residual from the systematic alone (fit-free, common-α reference)
+    if p_pct is None:
+        ax_res.plot(lambda_sq, dP.real / data.Q_err, '-', color='C0', linewidth=1.5)
+        ax_res.plot(lambda_sq, dP.imag / data.U_err, '-', color='C1', linewidth=1.5)
+    ax_res.axhline(0.0, color='gray', linestyle=':', linewidth=0.8)
+    ax_res.set_xlabel(r'$\lambda^2$ (m$^2$)')
+    ax_res.set_ylabel(r'Residual / $\sigma$')
+    ax_res.text(0.03, 0.95, rf'{resid_label}:  $\chi^2_\nu$ = {chi2_red:.2f}',
+                transform=ax_res.transAxes, ha='left', va='top', fontsize=11)
+    ax_res.legend(fontsize=9, loc='lower right')
+    ax_res.grid(True, alpha=0.3)
+    add_ticks_all_sides(ax_res)
+
+    for ax, letter in zip(axes.flat, 'abcdef'):
+        ax.text(-0.02, 1.02, f'({letter})', transform=ax.transAxes, ha='right', va='bottom',
+                fontsize=12, fontweight='bold')
+
+    if title is not None:
+        fig.suptitle(title, fontsize=14, fontweight='bold')
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96] if title else [0, 0, 1, 1])
+
+    if filename:
+        out = Path(output_dir) if output_dir else Path.cwd()
+        out.mkdir(parents=True, exist_ok=True)
+        filepath = out / filename
+        fig.savefig(filepath, dpi=150, bbox_inches='tight')
+        print(f"Saved spectral index diagnostic: {filepath}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
 
 
 # =============================================================================
@@ -1204,12 +1642,30 @@ def run_test_scenario():
     # Data generation parameters
     FREQ_RANGE = (0.9, 1.65)      # Frequency range in GHz
     N_CHANNELS = 250               # Number of frequency channels
-    SPECTRAL_INDEX = -0.6         # Spectral index (I ∝ ν^α)
+    SPECTRAL_INDEX = -0.6         # Spectral index (I ∝ ν^α) of the remainder emission
+                                  # (= total I if no component sets 'spectral_index')
     SNR = 15.0                      # Signal-to-noise ratio
     OSCILLATION = False           # Add sinusoidal oscillation (3 periods over λ²)
     ONLY_I = False                 # True: frac pol constant, False: abs pol constant
 
     data_file = output_dir / "synthetic_data.txt"
+
+    # Per-component Stokes I spectra ('spectral_index' + 'I_frac' in the component dicts)
+    stokes_i = get_component_stokes_i(
+        THIN_COMPONENTS, POWERLAW_COMPONENTS, THICK_COMPONENTS, SPECTRAL_INDEX
+    )
+    mixed_spectral_indices = any(a != SPECTRAL_INDEX for a in stokes_i['alphas'])
+    for info, alpha_k, f_k in zip(true_component_info, stokes_i['alphas'], stokes_i['I_fracs']):
+        info['params']['spectral_index'] = alpha_k
+        info['params']['I_frac'] = f_k
+    if mixed_spectral_indices:
+        alpha_I_ref = stokes_i_local_index(NU_REF_GHZ, stokes_i)
+        print(f"Per-component Stokes I spectra (remainder: α = {SPECTRAL_INDEX:+.3f}, "
+              f"f = {1.0 - sum(stokes_i['I_fracs']):.3f}; total I local α at "
+              f"{NU_REF_GHZ} GHz = {alpha_I_ref:+.3f}):")
+        for info, alpha_k, f_k in zip(true_component_info, stokes_i['alphas'], stokes_i['I_fracs']):
+            print(f"  {info['label']}: α = {alpha_k:+.3f}, I_frac = {f_k:.3f}  "
+                  f"(β_eq = {alpha_k - alpha_I_ref:+.3f})")
 
     generate_synthetic_data(
         true_model,
@@ -1219,7 +1675,8 @@ def run_test_scenario():
         spectral_index=SPECTRAL_INDEX,
         snr=SNR,
         oscillation=OSCILLATION,
-        only_I=ONLY_I
+        only_I=ONLY_I,
+        stokes_i=stokes_i
     )
 
     print(f"Generated {N_CHANNELS} channels from {FREQ_RANGE[0]}-{FREQ_RANGE[1]} GHz, SNR={SNR}")
@@ -1237,8 +1694,11 @@ def run_test_scenario():
         load_stokes_v=False
     )
 
-    print(f"Power-law fit: I₀ = {I_fitter.fit_params[0]:.4f} mJy, α = {I_fitter.fit_params[1]:.4f}")
-    print(f"True values: I₀ = 1.0 mJy, α = {SPECTRAL_INDEX}")
+    print(f"Power-law fit: I₀ = {I_fitter.fit_params[0]:.4f} mJy, "
+          f"α_ν = {-2 * I_fitter.fit_params[1]:.4f}")
+    print(f"True values: I = 1.0 mJy at {NU_REF_GHZ} GHz, local α_ν at {central_freq_ghz:.3f} GHz = "
+          f"{stokes_i_local_index(central_freq_ghz, stokes_i):.4f}"
+          + (" (total I is a sum of power laws: curved)" if mixed_spectral_indices else ""))
 
     # Plot data diagnostic with I model fit
     if not QUICK_MODE:
@@ -1247,6 +1707,15 @@ def run_test_scenario():
             I_fitter=I_fitter,
             title=None,
             filename="test_data.png",
+            output_dir=output_dir
+        )
+
+    # Spectral index systematic, before fitting (residuals vs common-α truth)
+    if mixed_spectral_indices:
+        plot_spectral_index_diagnostic(
+            data, true_model, stokes_i,
+            component_labels=[info['label'] for info in true_component_info],
+            filename="test_spectral_index_prefit.png",
             output_dir=output_dir
         )
 
@@ -1447,6 +1916,16 @@ def run_test_scenario():
 
     print("\n[7] Creating PLOTS...")
 
+    # Spectral index systematic, after fitting (fit band + residuals vs fit)
+    if mixed_spectral_indices:
+        plot_spectral_index_diagnostic(
+            data, true_model, stokes_i,
+            component_labels=[info['label'] for info in true_component_info],
+            results=results,
+            filename="test_spectral_index_fit.png",
+            output_dir=output_dir
+        )
+
     if QUICK_MODE:
         # Quick mode: only the presentation summary
         plot_presentation_summary(
@@ -1472,12 +1951,22 @@ def run_test_scenario():
 
     else:
         # --- Determine if we should plot truths or medians ---
-        # If true model and fit model have the same structure, plot matched truths
-        models_match = (len(true_component_info) == len(fit_component_info) and
-                       all(t['type'] == f['type'] for t, f in zip(true_component_info, fit_component_info)))
+        # Re-express the truth in the fit's component types (per-component spectral
+        # indices become power-law betas) and plot matched truths if that works
+        fit_lambda_sq_0 = next((c.lambda_sq_0 for c in results.setup.model.components
+                                if isinstance(c, ThinPowerLawComponent)), None)
+        effective_truth_info = build_effective_truth(true_component_info, fit_component_info,
+                                                     stokes_i, fit_lambda_sq_0)
+        models_match = effective_truth_info is not None
 
         if models_match:
             print("\nTrue and fit models have matching structure")
+            if mixed_spectral_indices:
+                print("Effective truth for the fit model (spectral indices → power-law beta):")
+                for info in effective_truth_info:
+                    print(f"  {info['label']} as {info['type']}: p0={info['params']['p0']:.4f}"
+                          + (f", beta={info['params']['beta']:+.3f}" if 'beta' in info['params'] else ''))
+            true_component_info = effective_truth_info
 
             # Match components based on fitted parameter values
             matches = match_components(fit_component_info, true_component_info, results.param_summary)

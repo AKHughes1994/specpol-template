@@ -1370,7 +1370,15 @@ def plot_corner(samples: np.ndarray,
         sample_max = np.max(samples_eq[:, i])
         range_low = max(range_low, sample_min)
         range_high = min(range_high, sample_max)
-        
+
+        # Widen to include true values (synthetic data) so biased posteriors
+        # still show the truth line
+        if truth_label == "True Values" and truths[i] is not None and np.isfinite(truths[i]):
+            if truths[i] < range_low:
+                range_low = truths[i] - padding
+            elif truths[i] > range_high:
+                range_high = truths[i] + padding
+
         ranges.append((range_low, range_high))
     
     # Corner plot configuration
