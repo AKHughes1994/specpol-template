@@ -1,0 +1,41 @@
+# =============================================================================
+# Flagging configuration for faraday_obs_fit.py
+#
+# The [default] block applies to all datasets.
+# Each [[overrides]] block applies when any substring in 'match' is found
+# in the data file stem (data_id). Only the first matching override is used.
+# Any key omitted from an override inherits the default value.
+# =============================================================================
+
+[default]
+sigma_clip_extreme   = 20.0         # flag |value - median| > N * MAD_sigma (all IQUV flux + errors)
+jitter_frac          = 0.0
+sigma_clip_v         = 100.0       # "auto" or a float threshold
+sigma_clip_errors    = 10.0
+sigma_clip_spectrum  = 10.0
+spectrum_clip_sided  = "two"        # "low" | "two"
+spectrum_deg         = 4
+spectrum_stokes      = ["i", "qu"]  # "qu" clips on sqrt(Q²+U²) so Faraday-rotated (wrapped) Q and U aren't flagged;
+                                    # use ["i", "q", "u"] to clip Q and U separately (can't be mixed with "qu")
+freq_ranges          = []
+
+
+# -----------------------------------------------------------------------------
+# Per-dataset overrides
+# 'match' is a list of substrings; the first [[overrides]] block whose match
+# list contains any substring present in data_id is applied.
+# Only keys that differ from [default] need to be listed.
+# -----------------------------------------------------------------------------
+
+# Template — copy, uncomment and edit for any epoch that needs different settings.
+# Match on a date (e.g. "20240204") or any other substring of the data file stem.
+#[[overrides]]
+#match               = ["20240204"]
+#jitter_frac         = 0.0001         # fractional Stokes I jitter added to the spectrum fit
+#sigma_clip_v        = "auto"
+#sigma_clip_errors   = 5.0
+#sigma_clip_spectrum = 3.0
+#spectrum_clip_sided = "two"
+#spectrum_deg        = 4
+#freq_ranges         = ["1.60~1.80"]  # RFI-flagged frequency ranges, GHz
+

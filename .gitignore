@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Data and pipeline outputs (folders are kept via their .gitkeep)
+files/*/polkat_json/*
+files/*/QU_text/*
+files/*/summary/*
+files/spinifex_iono/*
+results/*/*
+plots/*/*
+rmsynth/*/*
+simulated/*
+!.gitkeep
