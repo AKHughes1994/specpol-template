@@ -63,6 +63,10 @@ P0_MAX = 0.50   # upper bound of the fractional-polarisation prior
 PHI_MIN = -500.0
 PHI_MAX = 500.0
 
+# Thick-component sigma_phi prior min, rad/m² (~1/6 the L-band RMTF FWHM of ~17 rad/m²).
+# Stops a T component shrinking to a point source, breaking its degeneracy with an S component
+SIGMA_PHI_MIN = 3.0
+
 # Thick-component sigma_phi prior max, rad/m² (~2x the RMTF FWHM, where you lose
 # ~50% sensitivity to thick components)
 SIGMA_PHI_MAX = 50.0

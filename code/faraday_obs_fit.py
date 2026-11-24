@@ -103,7 +103,8 @@ DATA_FILE_ARG = sys.argv[2]
 # =============================================================================
 from source_config import (SOURCE_NAME, CENTRAL_FREQ_GHZ, LAMBDA_SQ_REF, P0_MAX,
                            CONSTRAIN_ISM_RM, PHI_ISM, PHI_SYS, PHI_ISM_SIGMA, PHI_ISM_RANGE,
-                           IONO_LOC, IONO_HALF_WINDOW_MIN, PHI_MIN, PHI_MAX, SIGMA_PHI_MAX,
+                           IONO_LOC, IONO_HALF_WINDOW_MIN, PHI_MIN, PHI_MAX,
+                           SIGMA_PHI_MIN, SIGMA_PHI_MAX,
                            MIXED_ST_CONSTRAINED_PHI_RM, USE_PEAKED_ANGLE_PRIOR,
                            PEAKED_ANGLE_K, PEAKED_ANGLE_DEG)
 
@@ -236,7 +237,7 @@ THICK_PRIOR = {
         'peaked_angle_deg': PEAKED_ANGLE_DEG,
     },
     'phi_peak': ('uniform', phi_min, phi_max),
-    'sigma_phi': ('log_uniform', 1e-1, SIGMA_PHI_MAX),
+    'sigma_phi': ('log_uniform', SIGMA_PHI_MIN, SIGMA_PHI_MAX),
     'N': ('log_uniform', 2.0, 50.0),
     'effective_width_mode': False
 }
