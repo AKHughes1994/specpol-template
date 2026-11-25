@@ -106,7 +106,9 @@ from source_config import (SOURCE_NAME, CENTRAL_FREQ_GHZ, LAMBDA_SQ_REF, P0_MAX,
                            IONO_LOC, IONO_HALF_WINDOW_MIN, PHI_MIN, PHI_MAX,
                            SIGMA_PHI_MIN, SIGMA_PHI_MAX,
                            MIXED_ST_CONSTRAINED_PHI_RM, USE_PEAKED_ANGLE_PRIOR,
-                           PEAKED_ANGLE_K, PEAKED_ANGLE_DEG)
+                           PEAKED_ANGLE_K, PEAKED_ANGLE_DEG,
+                           TIE_RM, SKIP_IF_EXISTS, USE_RMCLEAN_PHI_RANGE, REQUIRE_RMCLEAN,
+                           RMCLEAN_THRESHOLD_FRAC, RMCLEAN_PHI_PADDING)
 
 
 MASTER_SEED = 25031995  # big day
@@ -116,17 +118,11 @@ rng = np.random.default_rng(MASTER_SEED)  # overridden per trial in the fit loop
 N_CORES = 15   # Or set to None to use N - 2 cores
 N_TRIALS = 1   # Repeat the fit N times with independent posterior draws; 1 = normal single run
 
-TIE_RM = False
-SKIP_IF_EXISTS = False  # If True, skip fitting and load existing .pkl if it exists
+# TIE_RM, SKIP_IF_EXISTS and the RM-CLEAN prior-range settings are in source_config.py
 
-USE_RMCLEAN_PHI_RANGE = True   # Derive phi_min/phi_max from RMSynthesis CLEAN components
-REQUIRE_RMCLEAN       = True  # If True and no RMclean file found, exit instead of falling back
-RMCLEAN_THRESHOLD_FRAC = 1e-6  # Components > this fraction of peak amplitude are significant
-RMCLEAN_PHI_PADDING    = 10.0  # rad/m² added to each side of the derived range
-
-# FDF plot phi ranges, rad/m². Each is either None (auto-computed by the plot
-# function from the RMTF FWHM and the fitted RM values), a scalar for a symmetric
-# window (±value), or a (phi_min, phi_max) tuple for an asymmetric window.
+# FDF plot phi ranges, rad/m². Each is either None (auto: the fit-results panel
+# zooms on the model and RM-CLEAN components; the diagnostic plot is centred on
+# zero), a scalar for a symmetric window (±value), or a (phi_min, phi_max) tuple.
 FDF_PHI_RANGE      = None   # Fit-results plot FDF panel
 FDF_DIAG_PHI_RANGE = 500.0  # Standalone FDF diagnostic plot (only when 'P' not in MODEL_TYPE)
 

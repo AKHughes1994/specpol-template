@@ -21,6 +21,7 @@ from astropy.time import Time
 from typing import List, Tuple, Optional, TYPE_CHECKING
 from scipy import signal
 from scipy.special import gamma
+from source_config import THICK_NSIG_FIT, THICK_NPHI_FIT
 
 C_LIGHT = 299792458.0  # m/s
 
@@ -538,12 +539,11 @@ class ThickComponent:
             pol = (self.a + 1j * self.b) * phase * depol
             return pol
         
-        # Numerical computation for non-Gaussian cases.
-        # Grid parameters from swept calibration on σ_φ=50 rad/m², band 0.85–1.8 GHz.
-        # Fit model: f(N) = a * N^b + c  (pinned through N=2, N_PHI inflated 20%).
-        # To recalibrate, rerun optimize_num_int.py and update the six constants below.
-        _nsig_a, _nsig_b, _nsig_c = 19.556, -2.190, 1.316
-        _nphi_a, _nphi_b, _nphi_c = 7252.291, -4.310, 55.407
+        # Numerical computation for non-Gaussian cases. Grid half-width (in σ_φ) and
+        # point count follow f(N) = a * N^b + c, with (a, b, c) = THICK_NSIG_FIT and
+        # THICK_NPHI_FIT from source_config.py (calibrated by calibrate_thick_grid.py).
+        _nsig_a, _nsig_b, _nsig_c = THICK_NSIG_FIT
+        _nphi_a, _nphi_b, _nphi_c = THICK_NPHI_FIT
 
         n_sigma   = _nsig_a * self.N ** _nsig_b + _nsig_c
         phi_range = n_sigma * self.sigma_phi
@@ -555,21 +555,13 @@ class ThickComponent:
         phi_grid = np.linspace(self.phi_peak - phi_range,
                                self.phi_peak + phi_range, n_phi)
         dphi = phi_grid[1] - phi_grid[0]
-        
-        # Compute FDF on grid
-        fdf = self.compute_fdf(phi_grid)
-        
-        # Fourier transform: P(λ²) = ∫ F(φ) exp(i*2*φ*λ²) dφ
-        # Use numba-optimized version for ~100x speedup
-        pol = fourier_transform_fdf_numba(fdf, phi_grid, lambda_sq)
-        
-        # Old pure Python version (commented for easy rollback):
-        # pol = np.zeros(len(lambda_sq), dtype=complex)
-        # for i, lsq in enumerate(lambda_sq):
-        #     integrand = fdf * np.exp(2j * phi_grid * lsq)
-        #     pol[i] = np.trapz(integrand, dx=dphi)
-        
-        return pol
+
+        # The FDF is symmetric about phi_peak and the grid has a node there (n_phi is odd),
+        # so the trapezoid sum over the full grid factors exactly into
+        # exp(2i φ_peak λ²) x a cosine sum over the upper half: same result, ~8x faster
+        fdf_half = self.compute_fdf(phi_grid[n_phi // 2:])   # φ_peak ... φ_peak + phi_range
+        half_sum = symmetric_fdf_transform_numba(fdf_half, dphi, lambda_sq)
+        return np.exp(2j * self.phi_peak * lambda_sq) * half_sum
 
     def compute_transfer_factor(self, lambda_sq_ref: float) -> complex:
         """
@@ -1156,9 +1148,35 @@ if NUMBA_AVAILABLE:
             integral = integrand[0] + integrand[-1]  # End points
             integral += 2.0 * np.sum(integrand[1:-1])  # Interior points
             integral *= dphi / 2.0
-            
+
             pol[i] = integral
-        
+
+        return pol
+
+    @numba.jit(nopython=True, parallel=False)
+    def symmetric_fdf_transform_numba(fdf_half, dphi, lambda_sq):
+        """
+        Trapezoid-rule ∫ F(φ) exp(2i(φ - φ_peak)λ²) dφ for an FDF symmetric about φ_peak,
+        from its upper half fdf_half = F(φ_peak + k·dφ), k = 0..m-1 (last node = grid edge).
+
+        Used by ThickComponent. The sin terms cancel in pairs, leaving
+        F_0 + 2 Σ w_k F_k cos(2kλ²dφ); cos(kx) is stepped with a rotation instead of a
+        cos call per point (adds ~1e-13 rounding).
+        """
+        m = len(fdf_half)
+        pol = np.zeros(len(lambda_sq), dtype=np.complex128)
+
+        for i in range(len(lambda_sq)):
+            x = 2.0 * lambda_sq[i] * dphi
+            dc, ds = np.cos(x), np.sin(x)          # rotation per grid step
+            c, s = dc, ds                          # cos(kx), sin(kx) at k = 1
+            acc = 0.0 + 0.0j
+            for k in range(1, m):
+                w = 0.5 if k == m - 1 else 1.0     # trapezoid half-weight at the grid edge
+                acc += w * fdf_half[k] * c
+                c, s = c * dc - s * ds, s * dc + c * ds
+            pol[i] = dphi * (fdf_half[0] + 2.0 * acc)
+
         return pol
 else:
     # Fallback: pure numpy implementations (slower)
@@ -1179,3 +1197,10 @@ else:
             integrand = fdf * np.exp(2j * phi_grid * lsq)
             pol[i] = np.trapz(integrand, dx=dphi)
         return pol
+
+    def symmetric_fdf_transform_numba(fdf_half, dphi, lambda_sq):
+        """Fallback implementation when numba is not available."""
+        weights = np.full(len(fdf_half), 2.0)   # interior nodes count once per half
+        weights[0], weights[-1] = 1.0, 1.0      # centre node once; edge nodes 2 x 0.5
+        cos_kx = np.cos(2.0 * dphi * np.outer(lambda_sq, np.arange(len(fdf_half))))
+        return dphi * (cos_kx @ (weights * fdf_half))

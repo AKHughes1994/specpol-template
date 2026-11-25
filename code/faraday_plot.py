@@ -430,6 +430,32 @@ def _save_fit_figure(fig, title, filename, output_dir, show):
     return fig
 
 
+def _fdf_zoom_window(model, clean_components, fwhm, clean_threshold_frac=0.01):
+    """
+    (phi_min, phi_max) for the fit-results FDF panel, zoomed on where the emission is
+    rather than centred on zero: spans the model components and the significant RM-CLEAN
+    components, padded by 2 RMTF FWHM each side and at least 6 FWHM wide.
+    """
+    features = []
+    for comp in model.components:
+        if hasattr(comp, 'phi_peak'):          # thick: cover the profile, not just its centre
+            features += [comp.phi_peak - 3.0 * comp.sigma_phi, comp.phi_peak + 3.0 * comp.sigma_phi]
+        elif hasattr(comp, 'phi_rm'):          # thin / power-law: a single Faraday depth
+            features.append(comp.phi_rm)
+    if clean_components is not None:
+        cc_phi, cc_amp = np.asarray(clean_components[0]), np.asarray(clean_components[1])
+        if cc_amp.size and np.max(cc_amp) > 0:   # CLEAN components above 1% of the brightest
+            features += list(cc_phi[cc_amp > clean_threshold_frac * np.max(cc_amp)])
+    if not features:
+        features = [0.0]
+
+    phi_min, phi_max = min(features) - 2.0 * fwhm, max(features) + 2.0 * fwhm
+    if phi_max - phi_min < 6.0 * fwhm:         # keep RMTF-scale structure readable
+        centre = 0.5 * (phi_min + phi_max)
+        phi_min, phi_max = centre - 3.0 * fwhm, centre + 3.0 * fwhm
+    return float(phi_min), float(phi_max)
+
+
 def plot_fit_results(results: 'FitResults',
                     true_model: Optional['CompositeModel'] = None,
                     I_fitter: Optional[IFitter] = None,
@@ -481,8 +507,9 @@ def plot_fit_results(results: 'FitResults',
                  Values > 1.0 extend range beyond data for debugging.
         phi_range: Faraday depth range for FDF panel. Either a scalar for a
                    symmetric window (±phi_range) or a (phi_min, phi_max) tuple
-                   for an asymmetric window. If None, auto-computed
-                   (symmetric) from RMTF FWHM and fitted RM values.
+                   for an asymmetric window. If None, zooms on the model and
+                   RM-CLEAN components (see _fdf_zoom_window), so a large RM
+                   doesn't force a wide window centred on zero.
         n_phi: Number of points in Faraday depth grid for FDF panel
         weight_type: Weighting for RM synthesis ('variance' or 'uniform')
         model_method: Method for FDF model parameters ('representative', 'median',
@@ -910,28 +937,13 @@ def plot_fit_results(results: 'FitResults',
     else:
         fdf_model = results.get_best_fit_model(method=model_method)
     
-    # Auto-compute phi_range if not provided
+    # Auto window if not provided: zoom on the model and RM-CLEAN components
     if phi_range is None:
         _, rmtf_props_temp = compute_rmtf(lambda_sq, np.array([0.0]),
                                           weight_type=weight_type,
                                           Q_err=data.Q_err, U_err=data.U_err)
-        fwhm = rmtf_props_temp['expected_fwhm_nominal']
-        
-        rm_values = []
-        for comp in fdf_model.components:
-            if hasattr(comp, 'phi_rm'):
-                rm_values.append(comp.phi_rm)
-            elif hasattr(comp, 'phi_peak'):
-                rm_values.append(comp.phi_peak)
-        
-        if rm_values:
-            rm_max = np.max(rm_values)
-            rm_min = np.min(rm_values)
-            phi_range_comps = max(abs(rm_max + 1.0 * fwhm), abs(rm_min - 1.0 * fwhm))
-        else:
-            phi_range_comps = 0.0
-        
-        phi_range = max(5.0 * fwhm, phi_range_comps, 100.0)
+        phi_range = _fdf_zoom_window(fdf_model, clean_components,
+                                     rmtf_props_temp['expected_fwhm_nominal'])
 
     # phi_range may be a scalar (symmetric ±phi_range) or a (phi_min, phi_max)
     # tuple for an asymmetric window.

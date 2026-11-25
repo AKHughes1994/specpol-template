@@ -37,6 +37,7 @@ from faraday_plot import (plot_data_diagnostic, plot_fit_results, plot_corner,
                          plot_convergence, plot_fdf_diagnostic,
                          setup_publication_quality, add_ticks_all_sides)
 from faraday_processing import process_posterior_modes, ProcessingConfig
+from source_config import BASE_DIR, SOURCE_DIR
 
 
 # =============================================================================
@@ -105,6 +106,14 @@ QUICK_MODE = False
 
 # Reference frequency (GHz) for the Stokes I power laws and per-component p0
 NU_REF_GHZ = 1.3
+
+# FREQUENCY CHANNELS
+# By default the simulation uses every channel found in your QU text files
+# (files/<SOURCE_DIR>/QU_text/*.txt, all epochs combined), so it matches your band.
+# If there are none, or USE_DATA_CHANNELS = False, FREQ_RANGE / N_CHANNELS in
+# run_test_scenario (SECTION 2) are used instead.
+USE_DATA_CHANNELS = True
+QU_TEXT_DIR = BASE_DIR / 'files' / SOURCE_DIR / 'QU_text'
 
 
 # =============================================================================
@@ -490,10 +499,34 @@ def match_components(fit_component_info, true_component_info, param_summary):
 
 
 # =============================================================================
+# HELPER FUNCTION: FREQUENCY CHANNELS
+# =============================================================================
+
+def get_channel_freqs_ghz(freq_ghz_range, n_channels):
+    """
+    Sorted channel frequencies (GHz) to simulate.
+
+    Every channel in the QU text files (all epochs combined, duplicates
+    removed) if USE_DATA_CHANNELS and any exist; otherwise n_channels evenly
+    spaced over freq_ghz_range.
+    """
+    qu_files = sorted(QU_TEXT_DIR.glob('*.txt')) if USE_DATA_CHANNELS else []
+    if qu_files:
+        freq_hz = np.unique(np.concatenate([np.loadtxt(f, usecols=0, ndmin=1) for f in qu_files]))
+        freq_ghz = freq_hz[np.isfinite(freq_hz) & (freq_hz > 0)] / 1e9
+        print(f"Channels from {len(qu_files)} QU text file(s) in {QU_TEXT_DIR}")
+        return freq_ghz
+
+    if USE_DATA_CHANNELS:
+        print(f"No QU text files in {QU_TEXT_DIR}; using FREQ_RANGE / N_CHANNELS instead")
+    return np.linspace(freq_ghz_range[0], freq_ghz_range[1], n_channels)
+
+
+# =============================================================================
 # HELPER FUNCTION: GENERATE SYNTHETIC DATA WITH POWER-LAW SPECTRUM
 # =============================================================================
 
-def generate_synthetic_data(model, output_file, freq_ghz_range=(0.9, 1.7), n_channels=128,
+def generate_synthetic_data(model, output_file, freq_ghz,
                            spectral_index=-0.35, I_ref=1.0, snr=25,
                            oscillation=False, only_I=True,
                            stokes_i=None):
@@ -503,8 +536,7 @@ def generate_synthetic_data(model, output_file, freq_ghz_range=(0.9, 1.7), n_cha
     Args:
         model: CompositeModel defining the polarized emission
         output_file: Path to save the data file
-        freq_ghz_range: Frequency range in GHz (min, max)
-        n_channels: Number of frequency channels
+        freq_ghz: Channel frequencies in GHz (get_channel_freqs_ghz)
         spectral_index: Spectral index alpha (I ∝ ν^alpha); with stokes_i,
             only that of the remainder emission (stokes_i['background_index'])
         I_ref: Total intensity at NU_REF_GHZ
@@ -516,8 +548,8 @@ def generate_synthetic_data(model, output_file, freq_ghz_range=(0.9, 1.7), n_cha
             component regions plus the remainder (stokes_i_spectrum). None →
             single power law, all components follow it.
     """
-    # Generate frequency grid
-    freq_ghz = np.linspace(freq_ghz_range[0], freq_ghz_range[1], n_channels)
+    # Wavelengths of the channels
+    freq_ghz = np.asarray(freq_ghz, dtype=float)
     lambda_m = 0.2998 / freq_ghz  # Wavelength in m
     lambda_sq = lambda_m**2  # Wavelength squared in m^2
     freq_hz = freq_ghz * 1e9  # Frequency in Hz
@@ -1640,8 +1672,8 @@ def run_test_scenario():
     print("\n[2] Generating SYNTHETIC DATA and saving to file...")
 
     # Data generation parameters
-    FREQ_RANGE = (0.9, 1.65)      # Frequency range in GHz
-    N_CHANNELS = 250               # Number of frequency channels
+    FREQ_RANGE = (0.9, 1.65)      # Frequency range in GHz (only if no QU text files / USE_DATA_CHANNELS = False)
+    N_CHANNELS = 250               # Number of frequency channels (as above)
     SPECTRAL_INDEX = -0.6         # Spectral index (I ∝ ν^α) of the remainder emission
                                   # (= total I if no component sets 'spectral_index')
     SNR = 15.0                      # Signal-to-noise ratio
@@ -1667,11 +1699,12 @@ def run_test_scenario():
             print(f"  {info['label']}: α = {alpha_k:+.3f}, I_frac = {f_k:.3f}  "
                   f"(β_eq = {alpha_k - alpha_I_ref:+.3f})")
 
+    freq_ghz = get_channel_freqs_ghz(FREQ_RANGE, N_CHANNELS)
+
     generate_synthetic_data(
         true_model,
         output_file=data_file,
-        freq_ghz_range=FREQ_RANGE,
-        n_channels=N_CHANNELS,
+        freq_ghz=freq_ghz,
         spectral_index=SPECTRAL_INDEX,
         snr=SNR,
         oscillation=OSCILLATION,
@@ -1679,11 +1712,11 @@ def run_test_scenario():
         stokes_i=stokes_i
     )
 
-    print(f"Generated {N_CHANNELS} channels from {FREQ_RANGE[0]}-{FREQ_RANGE[1]} GHz, SNR={SNR}")
+    print(f"Generated {freq_ghz.size} channels from {freq_ghz.min():.3f}-{freq_ghz.max():.3f} GHz, SNR={SNR}")
 
     # Load data with total intensity fit
     print("\n[2B] Loading data and fitting TOTAL INTENSITY...")
-    central_freq_ghz = (FREQ_RANGE[0] + FREQ_RANGE[1]) / 2
+    central_freq_ghz = (freq_ghz.min() + freq_ghz.max()) / 2
     lambda_sq_ref = (0.2998 / central_freq_ghz) ** 2
     data, I_fitter = DataLoader.load_physical_with_fit(
         str(data_file),

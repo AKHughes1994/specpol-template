@@ -436,7 +436,13 @@ Setting `MODEL_TO_FIT` to something other than `None` lets you test whether the 
 QUICK_MODE = False   # True = skip corner/convergence/FDF plots (faster for quick checks)
 ```
 
-Data generation parameters (frequency range, number of channels, SNR, spectral index) are set inside `run_test_scenario()` at the clearly marked `SECTION 2` block.
+By default the simulation uses every frequency channel in your QU text files (`files/target/QU_text/*.txt`, all epochs combined), so it matches your band:
+
+```python
+USE_DATA_CHANNELS = True   # False = always use FREQ_RANGE / N_CHANNELS below
+```
+
+If there are no QU text files (or `USE_DATA_CHANNELS = False`), it falls back to `FREQ_RANGE` / `N_CHANNELS`. These, and the other data generation parameters (SNR, spectral index), are set inside `run_test_scenario()` at the clearly marked `SECTION 2` block.
 
 ### 7.4 Running the script
 
@@ -473,20 +479,17 @@ Set `lambda_sq_ref` to the band-centre wavelength squared — for MeerKAT L-band
 
 ### 8.2 Thick component numerical solver
 
-For $N \neq 2$ (i.e., non-Gaussian FDFs), $P(\lambda^2)$ is computed by numerically Fourier-transforming the super-Gaussian FDF over a finite Faraday depth grid. The grid extent and point count are set by power-law fits calibrated against a sweep over $\sigma_\phi = 50\ \text{rad/m}^2$ in the MeerKAT L-band window (0.85–1.8 GHz); see `faraday_utils.py` lines 461–472:
+For $N \neq 2$ (i.e., non-Gaussian FDFs), $P(\lambda^2)$ is computed by numerically Fourier-transforming the super-Gaussian FDF over a finite Faraday depth grid. The grid half-width (in units of $\sigma_\phi$) and point count follow power laws in $N$, $f(N) = a N^b + c$, whose coefficients are config variables in `source_config.py`:
 
 ```python
-# Grid parameters from swept calibration on σ_φ=50 rad/m², band 0.85–1.8 GHz.
-# Fit model: f(N) = a * N^b + c  (pinned through N=2, N_PHI inflated 20%).
-# To recalibrate, rerun optimize_num_int.py and update the six constants below.
-_nsig_a, _nsig_b, _nsig_c = 19.556, -2.190, 1.316
-_nphi_a, _nphi_b, _nphi_c = 7252.291, -4.310, 55.407
-
-n_sigma   = _nsig_a * self.N ** _nsig_b + _nsig_c   # grid half-width in σ_φ units
-phi_range = n_sigma * self.sigma_phi
-n_phi     = ...                                       # number of grid points
+THICK_NSIG_FIT = (19.556, -2.190, 1.316)     # (a, b, c): grid half-width in σ_φ units
+THICK_NPHI_FIT = (7252.291, -4.310, 55.407)  # (a, b, c): grid points (rounded to odd)
 ```
 
-These constants are tuned for the Faraday thickness values and frequency coverage of this dataset. If you are working with significantly larger $\sigma_\phi$ values or a different frequency band, the grid may be too coarse to maintain the same numerical precision — the integrand becomes more oscillatory at large Faraday depths or at shorter wavelengths. In that case you will need to recalibrate by rerunning `optimize_num_int.py` and updating the six constants.
+The defaults were calibrated for MeerKAT L-band (0.85–1.8 GHz) with $\sigma_\phi = 50$ and $\phi_\text{peak} = 500\ \text{rad/m}^2$. Wider components need a wider grid, and the integrand oscillates faster at larger Faraday depths and longer wavelengths, so for a different band or wider priors the default grid may be too coarse. Recalibrate with
 
-I plan to extend the pipeline to MeerKAT L+S-band data and will update the grid calibration accordingly when those data are in hand. If you are applying this code outside the L-band regime in the meantime, treat thick component results with some caution.
+```bash
+cd code && python3 calibrate_thick_grid.py
+```
+
+For each $N$ it compares a sweep of grid sizes against a very fine reference integration, using the channels of your QU text files (MeerKAT L-band, with a warning, if there are none). The test component has $\sigma_\phi = 2 W_\text{max}$, twice the widest Gaussian Faraday-thick FWHM the band is sensitive to, $W_\text{max} \approx 0.67(\lambda_\text{min}^{-2} + \lambda_\text{max}^{-2})$ (Rudnick & Cotton 2023; $2 W_\text{max} \approx 59\ \text{rad/m}^2$ for MeerKAT L-band), and $\phi_\text{peak}$ = max(|`PHI_MIN`|, |`PHI_MAX`|). It keeps the cheapest grid with flux-weighted error $\sum|\Delta P| / \sum|P| < 10^{-6}$, fits the two power laws, checks the fitted grid, and prints the `THICK_NSIG_FIT` / `THICK_NPHI_FIT` lines to paste into `source_config.py`.

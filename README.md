@@ -23,20 +23,20 @@ cd /path/to/<SOURCE>/Specpol
 4. **RM synthesis** — `python3 code/faraday_synthesis.py`. **Run this before fitting**: its RM-CLEAN components set the Faraday-depth prior range for each epoch (`REQUIRE_RMCLEAN` in `faraday_obs_fit.py`), and it writes the per-epoch ISM RM estimate to `rmsynth/target/target_ism_rm.txt`.
 5. **ISM RM prior (optional)** — set `PHI_ISM` in `source_config.py` to the median from `target_ism_rm.txt` and `CONSTRAIN_ISM_RM = True` to pin the first S/P component's RM to ISM + ionosphere.
 6. **Flagging** — inspect `plots/target/*/..._flagging_diagnostic.png` and add per-epoch `[[overrides]]` (RFI ranges, clip thresholds) to `code/flagging_config.toml` as needed.
-7. **Fit** — `code/run_all_model.sh` fits every model in `MODELS` to every epoch (slow: days for a full suite; parallelise across epochs on a cluster). Single fits: `cd code && python3 faraday_obs_fit.py <MODEL_TYPE> ../files/target/QU_text/<file>.txt`.
-8. **Model selection** — `python3 code/compare_models.py` writes per-epoch summaries to `files/target/summary/`. Put the chosen models in `BEST_MODELS` in `code/run_best_models.sh` to regenerate just those.
-9. **Summary plot** — `python3 code/plot_s_components.py` plots the S-component parameters vs time and writes a CSV to `results/target/`.
+7. **Thick-component grid** — only needed if you fit `T` components. `cd code && python3 calibrate_thick_grid.py` calibrates the Faraday-depth grid used to integrate thick components, for the band of your QU text files (MeerKAT L-band, with a warning, if there are none), using σ_φ = 2 × W_max of the band (W_max: the widest Faraday-thick width the band is sensitive to, Rudnick & Cotton 2023) and the largest |φ| allowed by `PHI_MIN`/`PHI_MAX`. Paste the `THICK_NSIG_FIT` / `THICK_NPHI_FIT` lines it prints into `code/source_config.py`. The defaults are for MeerKAT L-band, σ_φ ≤ 50 and |φ| ≤ 500 rad/m². Each run is self-contained and calibrates from scratch; the L-band W_max is printed alongside your band's for reference.
+8. **Fit** — `code/run_all_model.sh` fits every model in `MODELS` to every epoch (slow: days for a full suite; parallelise across epochs on a cluster). Single fits: `cd code && python3 faraday_obs_fit.py <MODEL_TYPE> ../files/target/QU_text/<file>.txt`.
+9. **Model selection** — `python3 code/compare_models.py` writes per-epoch summaries to `files/target/summary/`. Put the chosen models in `BEST_MODELS` in `code/run_best_models.sh` to regenerate just those.
+10. **Summary plot** — `python3 code/plot_s_components.py` plots the S-component parameters vs time and writes a CSV to `results/target/`.
 
 ### Where the source-specific settings live
 
 | File | What to set |
 |---|---|
-| `code/source_config.py` | Source name and directory, observatory, band centre, iono/ISM RM constraint, prior ranges, preferred EVPA, jet PA. **Shared by every script.** |
+| `code/source_config.py` | Source name and directory, observatory, band centre, iono/ISM RM constraint, RM synthesis / CLEAN settings, fit options (tied RM, RM-CLEAN prior range), prior ranges, preferred EVPA, jet PA, thick-component grid coefficients. **Shared by every script.** |
 | `code/flagging_config.toml` | Default clipping + per-epoch `[[overrides]]` (matched on substrings of the file stem) |
 | `code/run_all_model.sh` | `MODELS` fitted to every epoch, optional `EXTRA_MODELS` per epoch |
 | `code/run_best_models.sh` | `DEFAULT_MODELS` and per-epoch `BEST_MODELS` |
-| `code/faraday_synthesis.py` | rmclean1d thresholds and their per-epoch overrides |
-| `code/faraday_obs_fit.py` | Sampler/run settings (`N_CORES`, `NLIVE_FACTOR`, `SAMPLER`, RM-CLEAN prior padding) — usually left alone |
+| `code/faraday_obs_fit.py` | Sampler/run settings (`N_CORES`, `NLIVE_FACTOR`, `SAMPLER`) — usually left alone |
 
 ---
 
@@ -62,7 +62,8 @@ Library modules imported by everything else; not run directly.
 | `run_spinifex.py` | Ionospheric RMs from spinifex in a window around each epoch (position and time read from the QU text headers). |
 | `compare_models.py` | Evidence-based model selection: simplest model within $\Delta \ln Z \leq 10$ of the best. |
 | `plot_s_components.py` | Time series of S-component parameters (iono-corrected RM) for one model type. |
-| `faraday_example_simulate.py` | Simulates a dataset from a user-specified model and fits it with the same pipeline (validation, prior tests). Outputs to `simulated/`. |
+| `calibrate_thick_grid.py` | Calibrates the thick-component integration grid for your band and priors (step 7); prints `THICK_NSIG_FIT` / `THICK_NPHI_FIT` for `source_config.py` and writes `results/` and `plots/thick_grid_calibration/`. |
+| `faraday_example_simulate.py` | Simulates a dataset from a user-specified model and fits it with the same pipeline (validation, prior tests). Uses the channels of your QU text files (all epochs combined), or a set frequency range if there are none. Outputs to `simulated/`. |
 | `run_all_model.sh`, `run_best_models.sh` | Batch runners (above). |
 
 ---
@@ -107,4 +108,4 @@ Not covered by `requirements.txt`:
 
 ## Caveat
 
-The thick-component numerical solver grid was calibrated for MeerKAT L-band (0.85–1.8 GHz); treat thick-component results outside that band with caution (see `EXAMPLE.md` §8.2).
+The default thick-component integration grid (`THICK_NSIG_FIT`, `THICK_NPHI_FIT`) was calibrated for MeerKAT L-band (0.85–1.8 GHz), σ_φ ≤ 50 and |φ| ≤ 500 rad/m². For another band or wider priors, re-run `calibrate_thick_grid.py` (step 7) before trusting thick-component results (see `EXAMPLE.md` §8.2).

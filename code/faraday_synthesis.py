@@ -1,6 +1,7 @@
 import warnings
 warnings.filterwarnings('ignore', message='.*pkg_resources.*')
 
+import os
 import re
 import sys
 import numpy as np
@@ -17,41 +18,39 @@ from faraday_plot import plot_flagging_diagnostic
 from faraday_data import DataLoader, FlaggingConfig
 from faraday_utils import load_iono_rm
 from source_config import (SOURCE_NAME, SOURCE_DIR, PHI_SYS, IONO_LOC, IONO_HALF_WINDOW_MIN,
-                           ISM_EXCLUDE, MIN_PEAK_SNR)
+                           ISM_EXCLUDE, MIN_PEAK_SNR,
+                           RMSYNTH_WEIGHTING, RMSYNTH_PHI_MAX, RMSYNTH_I_POLY_ORDER,
+                           RMSYNTH_SUPER_RESOLUTION, RMCLEAN_CUTOFF, RMCLEAN_WINDOW_CUTOFF,
+                           RMCLEAN_CUTOFF_OVERRIDES, RMCLEAN_WINDOW_CUTOFF_OVERRIDES)
 import subprocess
 
 FLAGGING_CONFIG_FILE = Path(__file__).parent / 'flagging_config.toml'
 
+# Environment for the rmsynth1d / rmclean1d subprocesses: hides RM-Tools'
+# "pkg_resources is deprecated" warning (keeps any PYTHONWARNINGS you already set)
+_PKG_RESOURCES_FILTER = 'ignore:pkg_resources is deprecated:UserWarning'
+RMTOOLS_ENV = {**os.environ, 'PYTHONWARNINGS': ','.join(
+    filter(None, [os.environ.get('PYTHONWARNINGS'), _PKG_RESOURCES_FILTER]))}
+
 # =============================================================================
 # SOURCE-SPECIFIC SETTINGS — review/change these when adapting to a new source
 # =============================================================================
-# Source name, iono and ISM settings are set in source_config.py.
+# Source name, iono/ISM and all RM synthesis / CLEAN settings (RMSYNTH_*, RMCLEAN_*)
+# are set in source_config.py.
 # TARGETS: subdirectories of ../files/ that contain a QU_text/ folder of input spectra.
 # Defaults to SOURCE_DIR; can be overridden on the command line: python3 faraday_synthesis.py target other_source
 TARGETS = sys.argv[1:] or [SOURCE_DIR]
 
-# rmclean1d thresholds (log10 of the CLEAN cutoff), applied to every file
-DEFAULT_PEAK  = '-7'   # -c : peak threshold
-DEFAULT_FINER = '-3'   # -w : finer-mask threshold
-
-# Optional per-epoch overrides: {frozenset of substrings of the file stem: threshold};
-# first match wins. e.g. PEAK_OVERRIDES = {frozenset(['20240204']): '-14'}
-PEAK_OVERRIDES = {}
-FINER_OVERRIDES = {}
+if RMSYNTH_WEIGHTING not in ('variance', 'uniform'):
+    sys.exit(f"RMSYNTH_WEIGHTING must be 'variance' or 'uniform', got {RMSYNTH_WEIGHTING!r}")
 
 
-def get_peak_threshold(base_name):
-    for keys, val in PEAK_OVERRIDES.items():
+def get_cutoff(base_name, default, overrides):
+    """rmclean1d cutoff for this epoch: the first matching override, else the default (as CLI text)."""
+    for keys, val in overrides.items():
         if any(k in base_name for k in keys):
-            return val
-    return DEFAULT_PEAK
-
-
-def get_finer_threshold(base_name):
-    for keys, val in FINER_OVERRIDES.items():
-        if any(k in base_name for k in keys):
-            return val
-    return DEFAULT_FINER
+            return str(val)
+    return str(default)
 
 
 def _date_key(stem):
@@ -222,27 +221,53 @@ def process_target(target, flagging_cfg):
         rmsynth_file = output_subdir / f"{base_name}_rmsynth.txt"
         np.savetxt(rmsynth_file, np.column_stack(flagged_cols))
 
-        # RMSynthesis
-        subprocess.run([
-            'rmsynth1d',
-            str(rmsynth_file),
-            '-S', '-o', '4', '-l', '2500', '--super-resolution'
-        ])
+        # RMSynthesis (RMSYNTH_* in source_config.py)
+        rmsynth_cmd = ['rmsynth1d', str(rmsynth_file), '-S',
+                       '-o', str(RMSYNTH_I_POLY_ORDER), '-l', str(RMSYNTH_PHI_MAX),
+                       '-w', RMSYNTH_WEIGHTING]
+        if RMSYNTH_SUPER_RESOLUTION:
+            rmsynth_cmd.append('--super-resolution')
+        subprocess.run(rmsynth_cmd, env=RMTOOLS_ENV)
 
-        # RMClean
+        # RMClean (RMCLEAN_* in source_config.py; here -w is the window cutoff, not a weighting)
         subprocess.run([
-            'rmclean1d',
-            str(rmsynth_file),
-            '-S', '-c', get_peak_threshold(base_name), '-w', get_finer_threshold(base_name)
-        ])
+            'rmclean1d', str(rmsynth_file), '-S',
+            '-c', get_cutoff(base_name, RMCLEAN_CUTOFF, RMCLEAN_CUTOFF_OVERRIDES),
+            '-w', get_cutoff(base_name, RMCLEAN_WINDOW_CUTOFF, RMCLEAN_WINDOW_CUTOFF_OVERRIDES)
+        ], env=RMTOOLS_ENV)
 
     # Baseline ISM RM from all CLEANed epochs (including ones skipped above as already fit)
     summarise_ism_rm(target, input_files, output_path)
+
+def print_settings(flagging_cfg):
+    """Summary of every setting this run uses (from source_config.py and flagging_config.toml)."""
+    base = Path(__file__).parent.parent
+    overrides = lambda d: f"; overrides {d}" if d else ""   # list per-epoch overrides only if set
+    rows = [
+        ("Targets",          ', '.join(TARGETS)),
+        ("Input",            ', '.join(str(base / 'files' / t / 'QU_text') for t in TARGETS)),
+        ("Output",           ', '.join(str(base / 'rmsynth' / t) for t in TARGETS)),
+        ("Flagging",         f"{FLAGGING_CONFIG_FILE.name}: default + "
+                             f"{len(flagging_cfg.get('overrides', []))} per-epoch override(s)"),
+        ("Weighting",        RMSYNTH_WEIGHTING),
+        ("Max |phi|",        f"{RMSYNTH_PHI_MAX} rad/m²"),
+        ("Stokes I order",   RMSYNTH_I_POLY_ORDER),
+        ("Super-resolution", RMSYNTH_SUPER_RESOLUTION),
+        ("CLEAN cutoff",     f"{RMCLEAN_CUTOFF} (negative = x sigma){overrides(RMCLEAN_CUTOFF_OVERRIDES)}"),
+        ("Window cutoff",    f"{RMCLEAN_WINDOW_CUTOFF}{overrides(RMCLEAN_WINDOW_CUTOFF_OVERRIDES)}"),
+        ("ISM summary",      f"peak S/N >= {MIN_PEAK_SNR}, excluding {ISM_EXCLUDE}, PHI_SYS = {PHI_SYS} rad/m²"),
+        ("Ionosphere",       f"{IONO_LOC} (±{IONO_HALF_WINDOW_MIN} min)" if IONO_LOC else "none (iono RM = 0)"),
+    ]
+    print(f"{'='*60}\nfaraday_synthesis.py settings for {SOURCE_NAME or '(SOURCE_NAME not set)'}\n{'='*60}")
+    for label, value in rows:
+        print(f"  {label:<17} {value}")
+
 
 def main():
     with open(FLAGGING_CONFIG_FILE, 'rb') as f:
         flagging_cfg = tomllib.load(f)
 
+    print_settings(flagging_cfg)
     for target in TARGETS:
         print(f"\n{'='*60}\nTarget: {target}\n{'='*60}")
         process_target(target, flagging_cfg)
